@@ -1,0 +1,59 @@
+# This repository intentionally tracks only the reproducible Hybrid-Mamba
+# experiment. The surrounding /data/huzhenghao/ml/h workspace is ~1.5 TB.
+/*
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/requirements.txt
+!/run_mamba_1.py
+!/dataloader/
+!/config/
+!/model/
+!/并行优化/
+
+# Minimal baseline dependencies.
+/dataloader/*
+!/dataloader/__init__.py
+!/dataloader/dataset.py
+/config/*
+!/config/__init__.py
+!/config/config_help_5.py
+/model/*
+!/model/__init__.py
+!/model/mamba/
+/model/mamba/*
+!/model/mamba/__init__.py
+!/model/mamba/mambamodel_1_917.py
+
+# Runtime/heavy material in the parallel experiment.
+/并行优化/experiments/
+/并行优化/数据/
+/并行优化/vendor/
+/并行优化/archive/
+/并行优化/__pycache__/
+/并行优化/config/*
+!/并行优化/config/auto_to_train/
+!/并行优化/config/rs_auto_to_train/
+/并行优化/config/landsat8_resume_600/
+/并行优化/final_results/PAPER_AI_MODEL_BRIEF.md
+/并行优化/final_results/landsat8_hybrid_600/logs/
+/并行优化/final_results/landsat8_hybrid_600/pipeline.log
+/并行优化/final_results/landsat8_hybrid_600/status.json
+
+# Checkpoints, datasets, caches and native build outputs.
+**/*.pth
+**/*.pt
+**/*.ckpt
+**/*.bin
+**/*.npy
+**/*.npz
+**/*.tif
+**/*.tiff
+**/*.whl
+**/*.so
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/build/
+**/dist/
+*.log
+.DS_Store

@@ -1,0 +1,13 @@
+torch
+torchvision
+compressai
+mamba-ssm
+timm
+einops
+numpy
+pandas
+matplotlib
+scipy
+pytorch-msssim
+tqdm
+pybind11

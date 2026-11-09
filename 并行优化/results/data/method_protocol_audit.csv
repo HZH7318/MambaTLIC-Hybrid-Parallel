@@ -1,0 +1,9 @@
+method,full_forward_rd_available,real_codec_supported,current_out_time_valid_as_real_codec,note
+elic,True,yes,False,custom compress/decompress
+ftic,True,adapter,False,real file-based coder; needs isolated temporary output per image
+hl,True,no,False,forward only; BPP is likelihood estimate
+hpcm,True,yes,False,custom compress/decompress and rANS extension
+hybrid_parallel,True,yes,False,independent real tail streams
+mlic,True,yes,False,custom compress/decompress
+our,True,yes,False,original Mamba compress/decompress
+rwk,True,yes,False,inherits CompressAI Elic2022Official codec API
