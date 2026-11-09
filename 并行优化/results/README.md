@@ -9,6 +9,9 @@
   notebook with automatic Landsat8 600-epoch result selection.
 - `plot_landsat8_rs_latest.py`: plotting code that automatically prefers the
   final 600-epoch Landsat8 Hybrid table when it becomes available.
+- `data/bd_rate_vs_elic.csv`: PSNR and MS-SSIM BD-Rate with ELIC as reference;
+  negative values mean bitrate savings relative to ELIC.
+- `figures/landsat8_rs_rd_publication.{png,pdf}`: publication-style 2x2 figure.
 
 The committed Hybrid RD rows are the completed 400-epoch results. The active
 600-epoch Landsat8 run will produce the final replacement under
