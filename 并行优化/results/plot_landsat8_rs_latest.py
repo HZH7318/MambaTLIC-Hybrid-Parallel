@@ -34,14 +34,14 @@ LABELS = {
 }
 
 COLORS = {
-    "elic": "#111111",
-    "rwk": "#E69F00",
-    "hl": "#009E73",
-    "mlic": "#CC79A7",
-    "ftic": "#56B4E9",
-    "hpcm": "#7F7F7F",
-    "our": "#7B2CBF",
-    "hybrid_parallel": "#D62728",
+    "elic": "#4477AA",
+    "rwk": "#EE6677",
+    "hl": "#228833",
+    "mlic": "#AA3377",
+    "ftic": "#66CCEE",
+    "hpcm": "#888888",
+    "our": "#332288",
+    "hybrid_parallel": "#CC3311",
 }
 
 METHOD_ORDER = (
@@ -55,15 +55,16 @@ LINESTYLES = {"elic": "--", "hybrid_parallel": "-"}
 
 plt.rcParams.update(
     {
-        "font.family": "DejaVu Serif",
+        "font.family": "DejaVu Sans",
         "font.size": 11,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "axes.linewidth": 1.0,
-        "legend.fontsize": 9,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "axes.labelsize": 13,
+        "axes.titlesize": 14,
+        "axes.linewidth": 1.1,
+        "legend.fontsize": 10,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
         "savefig.facecolor": "white",
+        "figure.facecolor": "white",
     }
 )
 
@@ -161,21 +162,29 @@ def draw_panel(ax, subset: pd.DataFrame, metric: str, title: str) -> None:
             label=LABELS.get(key, key),
             marker=MARKERS[key],
             linestyle=LINESTYLES.get(key, "-"),
-            markersize=10 if is_hybrid else 5.5,
+            markersize=11 if is_hybrid else 6.2,
             markeredgecolor="white" if is_hybrid else COLORS[key],
-            markeredgewidth=0.7,
-            linewidth=2.7 if is_hybrid else (2.2 if is_reference else 1.7),
+            markeredgewidth=0.9 if is_hybrid else 0.6,
+            linewidth=2.8 if is_hybrid else (2.1 if is_reference else 1.8),
             color=COLORS[key],
+            alpha=1.0 if is_hybrid or is_reference else 0.93,
             zorder=6 if is_hybrid else (5 if is_reference else 2),
         )
     ax.set_xlabel("Bits per pixel (BPP)")
     ax.set_ylabel("PSNR (dB)" if metric == "psnr" else "MS-SSIM (dB)")
-    ax.set_title(title, fontweight="semibold")
-    ax.set_xlim(left=0)
-    ax.grid(which="major", color="#C8C8C8", linewidth=0.65, alpha=0.55)
-    ax.minorticks_on()
-    ax.grid(which="minor", color="#E8E8E8", linewidth=0.35, alpha=0.35)
-    ax.tick_params(direction="in", top=True, right=True)
+    ax.set_title(title, loc="left", fontweight="bold", pad=12)
+    x_max = float(subset["bpp"].max())
+    y_min, y_max = float(subset[metric].min()), float(subset[metric].max())
+    y_pad = max((y_max - y_min) * 0.055, 0.15)
+    ax.set_xlim(0, x_max * 1.04)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+    ax.grid(color="#D8D8D8", linewidth=0.7, alpha=0.55)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#333333")
+    ax.spines["bottom"].set_color("#333333")
+    ax.tick_params(direction="out", length=4.5, width=0.9, colors="#333333")
 
 
 def plot_dataset(data: pd.DataFrame, dataset: str, title: str, show: bool = False) -> None:
@@ -184,45 +193,26 @@ def plot_dataset(data: pd.DataFrame, dataset: str, title: str, show: bool = Fals
         ("psnr", "PSNR (dB)", "psnr_bpp"),
         ("ms_ssim_db", "MS-SSIM (dB)", "msssim_bpp"),
     ):
-        fig, ax = plt.subplots(figsize=(8.2, 5.4))
+        fig, ax = plt.subplots(figsize=(9.2, 5.4))
         draw_panel(ax, subset, metric, f"{title}: {ylabel} vs. BPP")
-        ax.legend(ncol=2, frameon=True, framealpha=0.92, edgecolor="#BBBBBB")
-        fig.tight_layout()
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(
+            handles,
+            labels,
+            loc="center left",
+            bbox_to_anchor=(1.015, 0.5),
+            frameon=False,
+            borderaxespad=0,
+            handlelength=2.4,
+            labelspacing=0.9,
+        )
+        fig.subplots_adjust(left=0.105, right=0.79, bottom=0.14, top=0.90)
         output = FIGURES / f"{dataset}_{suffix}_latest.png"
         fig.savefig(output, dpi=300, bbox_inches="tight")
+        fig.savefig(output.with_suffix(".pdf"), bbox_inches="tight")
         if show:
             plt.show()
         plt.close(fig)
-
-
-def plot_publication_grid(data: pd.DataFrame, show: bool = False) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(13.2, 9.0))
-    panels = (
-        ("landsat8", "psnr", "(a) Landsat8: PSNR"),
-        ("landsat8", "ms_ssim_db", "(b) Landsat8: MS-SSIM"),
-        ("rs", "psnr", "(c) RS: PSNR"),
-        ("rs", "ms_ssim_db", "(d) RS: MS-SSIM"),
-    )
-    for ax, (dataset, metric, title) in zip(axes.flat, panels):
-        subset = data[data["Dataset"].str.lower().eq(dataset)]
-        draw_panel(ax, subset, metric, title)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="upper center",
-        ncol=8,
-        frameon=False,
-        bbox_to_anchor=(0.5, 1.01),
-        columnspacing=1.3,
-        handletextpad=0.45,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.955), h_pad=2.2, w_pad=2.0)
-    fig.savefig(FIGURES / "landsat8_rs_rd_publication.png", dpi=300, bbox_inches="tight")
-    fig.savefig(FIGURES / "landsat8_rs_rd_publication.pdf", bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close(fig)
 
 
 def main() -> None:
@@ -247,7 +237,6 @@ def main() -> None:
     )
     plot_dataset(data, "landsat8", "Landsat8", args.show)
     plot_dataset(data, "rs", "RS", args.show)
-    plot_publication_grid(data, args.show)
 
 
 if __name__ == "__main__":

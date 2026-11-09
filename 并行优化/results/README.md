@@ -11,7 +11,8 @@
   final 600-epoch Landsat8 Hybrid table when it becomes available.
 - `data/bd_rate_vs_elic.csv`: PSNR and MS-SSIM BD-Rate with ELIC as reference;
   negative values mean bitrate savings relative to ELIC.
-- `figures/landsat8_rs_rd_publication.{png,pdf}`: publication-style 2x2 figure.
+- `figures/{landsat8,rs}_{psnr_bpp,msssim_bpp}_latest.{png,pdf}`: four
+  separate publication-style RD figures.
 
 The committed Hybrid RD rows are the completed 400-epoch results. The active
 600-epoch Landsat8 run will produce the final replacement under
