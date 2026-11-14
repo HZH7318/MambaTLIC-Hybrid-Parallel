@@ -1,0 +1,17 @@
+dataset,method,lambda,compress_mean_s,compress_median_s,decompress_mean_s,decompress_median_s,mem_gib,flops_g,params_m,complexity_protocol,measurement_status
+landsat8,ELIC,16384,0.151715,0.151505,0.091114,0.090885,0.189401,112.073245,33.831175,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,RWK,16384,0.154914,0.151889,0.094854,0.094720,0.355746,102.635432,66.152249,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,MLIC++,16384,0.086103,0.086086,0.137493,0.137148,0.376544,148.881117,83.536752,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,HPCM,16384,0.024989,0.024826,0.023479,0.023441,0.307936,126.228990,68.507991,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,FTIC,16384,0.046114,0.041320,0.081347,0.077763,0.415873,82.399724,70.978716,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,HL,16384,0.029015,0.021646,0.033796,0.026455,0.234565,102.300385,29.398087,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,Our-Original,16384,0.188025,0.186947,0.126299,0.126466,0.337147,164.991142,25.631655,forward_batch1_7x256x256,measured_thop_supported_ops_only
+landsat8,Our-Native-1T,16384,0.066386,0.066447,0.066209,0.066249,0.318766,166.480120,20.066695,forward_batch1_7x256x256,measured_thop_supported_ops_only
+rs,ELIC,262144,0.225553,0.226073,0.133459,0.134873,0.190192,114.432541,33.859978,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,RWK,262144,0.151273,0.151223,0.094165,0.094150,0.356563,103.815080,66.166652,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,MLIC++,262144,0.144141,0.143485,0.220683,0.220425,0.377945,149.749338,83.563260,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,HPCM,262144,0.025824,0.025645,0.024300,0.024337,0.308709,126.983965,68.517210,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,FTIC,262144,0.042948,0.042923,0.078321,0.078239,0.417443,82.833834,70.991976,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,HL,262144,0.024287,0.023267,0.026534,0.024426,0.236935,106.547118,29.441290,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,Our-Original,262144,0.193472,0.192726,0.127498,0.127593,0.339994,165.469293,25.635306,forward_batch1_10x256x256,measured_thop_supported_ops_only
+rs,Our-Native-1T,262144,0.066477,0.066490,0.065435,0.065457,0.319023,166.958270,20.070346,forward_batch1_10x256x256,measured_thop_supported_ops_only

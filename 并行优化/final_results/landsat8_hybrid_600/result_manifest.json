@@ -1,0 +1,58 @@
+{
+  "completed_at": "2026-11-10T21:59:33.911045",
+  "training_target_epochs": 600,
+  "rd_protocol": "forward likelihood on the complete 1700-image Landsat8 test set",
+  "codec_protocol": "30 measured images after 5 warm-up images; real compress/decompress",
+  "codec_rows": [
+    {
+      "method": "hybrid_python_serial",
+      "dataset": "landsat8",
+      "lambda": 16384,
+      "images": 30,
+      "compress_mean_s": 0.11066611502319575,
+      "compress_median_s": 0.1104915295727551,
+      "decompress_mean_s": 0.11752547553430001,
+      "decompress_median_s": 0.11754533415660262,
+      "bpp": 0.5515299479166667,
+      "psnr": 45.3345344543457,
+      "ms_ssim_db": 23.079632504781088,
+      "latent_exact": true,
+      "codec_note": "native repository codec"
+    },
+    {
+      "method": "hybrid_native_1w",
+      "dataset": "landsat8",
+      "lambda": 16384,
+      "images": 30,
+      "compress_mean_s": 0.06591547712062797,
+      "compress_median_s": 0.06582660274580121,
+      "decompress_mean_s": 0.06529676653444767,
+      "decompress_median_s": 0.06534028565511107,
+      "bpp": 0.5515299479166667,
+      "psnr": 45.3345344543457,
+      "ms_ssim_db": 23.079632504781088,
+      "latent_exact": true,
+      "codec_note": "native repository codec"
+    },
+    {
+      "method": "hybrid_native_4w",
+      "dataset": "landsat8",
+      "lambda": 16384,
+      "images": 30,
+      "compress_mean_s": 0.06582785121475657,
+      "compress_median_s": 0.06579737644642591,
+      "decompress_mean_s": 0.06542374159519872,
+      "decompress_median_s": 0.06544029014185071,
+      "bpp": 0.5515299479166667,
+      "psnr": 45.3345344543457,
+      "ms_ssim_db": 23.079632504781088,
+      "latent_exact": true,
+      "codec_note": "native OpenMP multi-stream rANS"
+    }
+  ],
+  "primary_files": [
+    "landsat8_full_rd.csv",
+    "landsat8_full_test_rd.png",
+    "landsat8_hybrid_codec_30_images.csv"
+  ]
+}

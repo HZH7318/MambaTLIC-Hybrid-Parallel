@@ -2,6 +2,10 @@
 
 - `data/full_test_rd_all_methods.csv`: Landsat8 (1700 images) and RS (1217 images), likelihood-based full-test RD.
 - `data/codec_time_comparison.csv`: real-bitstream pilot timing (5 measured images after 1 warm-up).
+- `data/codec_complexity_summary.csv`: selected-method table with real
+  decompression time, measured forward peak GPU memory, FLOPs and parameter
+  counts. Complexity uses batch 1 at 256x256; FLOPs are twice THOP's MAC count
+  and cover THOP-supported operations only (custom CUDA kernels are excluded).
 - `notebooks/landsat8_results.ipynb`: Landsat8 table and BPP–PSNR/BPP–MS-SSIM plots.
 - `notebooks/rs_results.ipynb`: RS table and BPP–PSNR/BPP–MS-SSIM plots.
 - `notebooks/codec_time_rd_results.ipynb`: complete-codec timing analysis.
