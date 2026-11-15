@@ -39,6 +39,7 @@ def arguments():
             "hybrid_searchsorted_1w",
             "hybrid_searchsorted_14stream_1w",
             "hybrid_searchsorted_14stream_4w",
+            "hybrid_searchsorted_fusedpack_4w",
         ),
     )
     parser.add_argument("--dataset", required=True, choices=("landsat8", "rs"))
@@ -79,6 +80,7 @@ def load_model(args):
         "hybrid_searchsorted_1w",
         "hybrid_searchsorted_14stream_1w",
         "hybrid_searchsorted_14stream_4w",
+        "hybrid_searchsorted_fusedpack_4w",
     ):
         project_root = Path("/data/huzhenghao/ml/h")
         sys.path.insert(0, str(project_root))
@@ -100,7 +102,10 @@ def load_model(args):
                 "hybrid_searchsorted_14stream_1w",
             )
             searchsorted_indexes = args.method.startswith("hybrid_searchsorted_")
-            defer_native_encode = "14stream" in args.method
+            defer_native_encode = (
+                "14stream" in args.method or "fusedpack" in args.method
+            )
+            fuse_symbol_packing = "fusedpack" in args.method
             wrapper = HNet(
                 192,
                 320,
@@ -109,6 +114,7 @@ def load_model(args):
                 use_native_entropy=not python_serial,
                 use_searchsorted_indexes=searchsorted_indexes,
                 defer_native_encode=defer_native_encode,
+                fuse_symbol_packing=fuse_symbol_packing,
             )
             mappings = {
                 ("landsat8", 16384): OPT_ROOT / "experiments/train/20261019_0334_16384/bestmodel.pth",
@@ -292,6 +298,7 @@ def main():
                 "hybrid_batched_multistream",
                 "hybrid_4w",
                 "hybrid_searchsorted_14stream_4w",
+                "hybrid_searchsorted_fusedpack_4w",
             )
             else "native repository codec"
         ),

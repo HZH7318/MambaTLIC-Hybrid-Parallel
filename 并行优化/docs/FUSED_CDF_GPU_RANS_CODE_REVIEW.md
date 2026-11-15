@@ -415,3 +415,123 @@ bash 并行优化/run_codec_benchmark.sh \
 因此，在统一测试协议后，当前 Hybrid 已从“明显慢于 HPCM”改善为“延迟接近 HPCM”。两者仍不是完全相同的 RD 点，所以论文中应报告完整数值，不应简化为同质量胜负。
 
 此结果也使 GPU Tail-rANS 的优先级进一步降低：在投入 GPU coder 开发前，应先补齐 P0 阶段表，并验证剩余约 1–2 ms 差距是来自概率网络、主变换还是数据同步。
+
+## 11. P0/P3 与原生 rANS 后续实测（2026-11-15）
+
+### 11.1 P0 同步阶段剖析
+
+使用 Landsat8 `lambda=16384`、5 张预热、30 张正式图片，对 P2-4T 的
+完整真实 codec 逐阶段同步计时。编码阶段和完整时间的残差为 `0.155 ms`
+（约 `0.58%`），解码残差为 `0.153 ms`，满足 P0 的误差不超过 5% 要求。
+
+| Encode stage | Mean time | Share of complete Enc. |
+|---|---:|---:|
+| Analysis transform | 12.05 ms | 44.6% |
+| Hyper analysis | 0.29 ms | 1.1% |
+| z entropy round-trip | 3.80 ms | 14.1% |
+| Hyper synthesis | 0.53 ms | 2.0% |
+| Prefix probability/quantization | 3.35 ms | 12.4% |
+| Tail Anchor probability/quantization | 0.89 ms | 3.3% |
+| Tail Non-anchor probability/quantization | 0.58 ms | 2.2% |
+| y entropy encode | 5.34 ms | 19.8% |
+
+对 `y entropy encode` 继续拆分：
+
+| y entropy substage | Mean time |
+|---|---:|
+| Symbol quantization and packing | 0.64 ms |
+| GPU to CPU transfer | 0.52 ms |
+| Host views and cached CDF | 0.03 ms |
+| Native rANS encode | 4.07 ms |
+
+该结果修正了此前“纯 rANS 只有约 0.2 ms”的判断。早期微基准只覆盖少量
+尾部流；编码端统一提交实际包含 6 条前缀流和 8 条尾部流，符号总量和任务
+尺寸分布均不同。完整 14 流路径中，CPU rANS 本身仍是可优化项。
+
+解码端主要阶段为：synthesis transform `14.62 ms`、前三组前缀概率预测及
+熵解码 `4.68 ms`、z 熵解码 `2.21 ms`、尾部 Anchor/Non-anchor 两阶段合计
+约 `3.62 ms`。因此编码端底层优化不会等比例改善解码。
+
+### 11.2 Fused symbol packing：正确但收益不足
+
+P3 的低风险 PyTorch 原型将 14 次独立 `clone/subtract/round/int` 合并为一次
+批量 symbol quantization 和一次打包。5 张真实图片的码流逐字节一致，编码端
+latent 和解码 round-trip latent 全部逐元素一致。
+
+两次交叉顺序、每次 30 张图片的均值为：
+
+```text
+P2 reference Enc. = 26.575 ms
+Fused packing Enc. = 26.253 ms
+reduction          = 1.21%
+```
+
+该收益低于 3%/5% 的保留门槛，因此 fused packing 仅保留为显式实验开关，
+不替换正式默认路径，也不据此开发 Triton kernel。
+
+### 11.3 直接反向 rANS：去除中间 EncSymbol 动态向量
+
+原生编码器原先先为每个输入符号构造 `EncSymbol` 动态向量，再反向弹出并写入
+rANS。新实现先精确统计包含 bypass 的编码符号数，然后按完全相同的逆序语义
+直接写入 rANS 状态，避免中间向量的分配、写入和反向读取。
+
+正确性验证：
+
+- 5 张真实图片与 CompressAI/Python serial coder 的 15 条码流逐字节一致；
+- 编码端 latent 和解码 round-trip latent 全部一致；
+- 100 轮随机极值测试、共 1400 条流通过，覆盖 `-100000` 到 `100000` 的
+  bypass symbol。
+
+阶段结果：
+
+```text
+Native rANS encode: 4.066 ms -> 2.416 ms  (-40.6%)
+Complete compress:  26.983 ms -> 25.419 ms (-5.8%)
+```
+
+该优化超过完整编码下降 3% 的保留门槛，且不改变码流格式，应保留。
+
+### 11.4 动态 OpenMP 调度：获得可测的四线程完整收益
+
+14 条任务按码流顺序排列时，前缀流较小、尾部流较大。原来的
+`schedule(static)` 将连续任务固定分给线程，使部分线程只处理小前缀流，另一些
+线程承担多个大尾部流。改为 `schedule(dynamic, 1)` 后，四个线程动态领取任务。
+
+直接反向 rANS 基础上的阶段结果：
+
+```text
+4-worker native rANS: 2.416 ms -> 1.784 ms (-26.1%)
+Complete compress:    25.419 ms -> 24.979 ms (-1.7%, synchronized profile)
+```
+
+按正反两种执行顺序各做一次 30 图完整计时，平均结果为：
+
+| Method | Enc. mean | Dec. mean | BPP | PSNR | MS-SSIM(dB) |
+|---|---:|---:|---:|---:|---:|
+| Optimized Native 1-worker | 25.194 ms | 26.107 ms | 0.551530 | 45.3345 | 23.0796 |
+| Optimized Native 4-worker | **24.200 ms** | **25.759 ms** | 0.551530 | 45.3345 | 23.0796 |
+
+因此 4-worker 相对 1-worker 的完整编码下降约 `3.95%`（`1.041x`），完整解码
+下降约 `1.33%`。这不是四倍加速，但已经是稳定、正反顺序均复现的完整 codec
+收益。论文应表述为“小幅但真实的多流并行收益”，不能表述成线性线程加速。
+
+### 11.5 与 HPCM 的最新同机复测
+
+使用同一 GPU、同一 5 张预热和 30 张正式图片协议，各重复两次：
+
+| Method | Enc. mean | Dec. mean | BPP | PSNR | MS-SSIM(dB) |
+|---|---:|---:|---:|---:|---:|
+| HPCM | 26.853 ms | **25.073 ms** | **0.545199** | 45.3026 | **23.1308** |
+| Optimized Hybrid 4-worker | **24.200 ms** | 25.759 ms | 0.551530 | **45.3345** | 23.0796 |
+
+在这一接近但不完全相同的 RD 点上，Hybrid 编码约快 `9.88%`，解码约慢
+`2.74%`。该结论仅适用于当前匹配测试点，不应外推为整条 RD 曲线上的统一胜负。
+
+### 11.6 当前决策
+
+- 保留 searchsorted、14 流统一提交、直接反向 rANS 和动态 OpenMP 调度；
+- fused symbol packing 因完整收益只有约 1.2%，不进入正式默认路径；
+- 暂不开发 GPU rANS：当前 GPU→CPU 仅约 0.52 ms，GPU coder 很难满足绝对
+  下降至少 2 ms 的启动条件；
+- 下一优先级应放在解码端 synthesis transform 和前三个串行前缀阶段，或研究
+  Hybrid-V2 的依赖深度，而不是继续增加 Python/OpenMP 线程数。

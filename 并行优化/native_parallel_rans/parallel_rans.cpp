@@ -17,12 +17,6 @@ constexpr int kPrecision = 16;
 constexpr uint16_t kBypassPrecision = 4;
 constexpr uint16_t kMaxBypass = (1 << kBypassPrecision) - 1;
 
-struct EncSymbol {
-  uint16_t start;
-  uint16_t range;
-  bool bypass;
-};
-
 struct TaskView {
   const int32_t *symbols;
   const int32_t *indexes;
@@ -74,8 +68,10 @@ void validate_index(int32_t index, const CdfView &cdf) {
 }
 
 std::string encode_one(const TaskView &task, const CdfView &cdf) {
-  std::vector<EncSymbol> encoded;
-  encoded.reserve(static_cast<size_t>(task.size) * 2);
+  // Count the exact number of reverse-coded symbols first.  The previous
+  // implementation materialized an EncSymbol vector and then popped it in
+  // reverse order, adding allocation and memory traffic to every stream.
+  size_t encoded_count = 0;
   for (ssize_t i = 0; i < task.size; ++i) {
     const int32_t cdf_index = task.indexes[i];
     validate_index(cdf_index, cdf);
@@ -90,6 +86,57 @@ std::string encode_one(const TaskView &task, const CdfView &cdf) {
       raw_value = static_cast<uint32_t>(2 * (value - max_value));
       value = max_value;
     }
+    ++encoded_count;
+    if (value == max_value) {
+      int32_t bypasses = 0;
+      while ((raw_value >> (bypasses * kBypassPrecision)) != 0) {
+        ++bypasses;
+      }
+      encoded_count += static_cast<size_t>(bypasses);
+      encoded_count += static_cast<size_t>(bypasses / kMaxBypass) + 1;
+    }
+  }
+
+  Rans64State rans;
+  Rans64EncInit(&rans);
+  std::vector<uint32_t> output(std::max<size_t>(encoded_count + 2, 4),
+                               0xCCCCCCCC);
+  uint32_t *ptr = output.data() + output.size();
+
+  // Emit exactly the reverse of the logical forward symbol sequence without
+  // materializing that sequence.  For an escaped symbol, raw nibbles are
+  // reversed first, followed by the bypass count and finally the CDF symbol.
+  for (ssize_t i = task.size; i-- > 0;) {
+    const int32_t cdf_index = task.indexes[i];
+    const int32_t cdf_length = cdf.lengths[cdf_index];
+    const int32_t max_value = cdf_length - 2;
+    int32_t value = task.symbols[i] - cdf.offsets[cdf_index];
+    uint32_t raw_value = 0;
+    if (value < 0) {
+      raw_value = static_cast<uint32_t>(-2 * value - 1);
+      value = max_value;
+    } else if (value >= max_value) {
+      raw_value = static_cast<uint32_t>(2 * (value - max_value));
+      value = max_value;
+    }
+
+    if (value == max_value) {
+      int32_t bypasses = 0;
+      while ((raw_value >> (bypasses * kBypassPrecision)) != 0) {
+        ++bypasses;
+      }
+      for (int32_t j = bypasses; j-- > 0;) {
+        const uint32_t part =
+            (raw_value >> (j * kBypassPrecision)) & kMaxBypass;
+        put_bits(&rans, &ptr, part, kBypassPrecision);
+      }
+      put_bits(&rans, &ptr, static_cast<uint32_t>(bypasses % kMaxBypass),
+               kBypassPrecision);
+      for (int32_t remaining = bypasses; remaining >= kMaxBypass;
+           remaining -= kMaxBypass) {
+        put_bits(&rans, &ptr, kMaxBypass, kBypassPrecision);
+      }
+    }
 
     const int32_t *row = cdf.data + cdf_index * cdf.stride;
     const int32_t start = row[value];
@@ -97,44 +144,7 @@ std::string encode_one(const TaskView &task, const CdfView &cdf) {
     if (range <= 0) {
       throw std::runtime_error("CDF must be strictly increasing");
     }
-    encoded.push_back({static_cast<uint16_t>(start),
-                       static_cast<uint16_t>(range), false});
-
-    if (value == max_value) {
-      int32_t bypasses = 0;
-      while ((raw_value >> (bypasses * kBypassPrecision)) != 0) {
-        ++bypasses;
-      }
-      int32_t remaining = bypasses;
-      while (remaining >= kMaxBypass) {
-        encoded.push_back({kMaxBypass, static_cast<uint16_t>(kMaxBypass + 1),
-                           true});
-        remaining -= kMaxBypass;
-      }
-      encoded.push_back({static_cast<uint16_t>(remaining),
-                         static_cast<uint16_t>(remaining + 1), true});
-      for (int32_t j = 0; j < bypasses; ++j) {
-        const int32_t part =
-            (raw_value >> (j * kBypassPrecision)) & kMaxBypass;
-        encoded.push_back({static_cast<uint16_t>(part),
-                           static_cast<uint16_t>(part + 1), true});
-      }
-    }
-  }
-
-  Rans64State rans;
-  Rans64EncInit(&rans);
-  std::vector<uint32_t> output(std::max<size_t>(encoded.size() + 2, 4),
-                               0xCCCCCCCC);
-  uint32_t *ptr = output.data() + output.size();
-  while (!encoded.empty()) {
-    const EncSymbol symbol = encoded.back();
-    encoded.pop_back();
-    if (symbol.bypass) {
-      put_bits(&rans, &ptr, symbol.start, kBypassPrecision);
-    } else {
-      Rans64EncPut(&rans, &ptr, symbol.start, symbol.range, kPrecision);
-    }
+    Rans64EncPut(&rans, &ptr, start, range, kPrecision);
   }
   Rans64EncFlush(&rans, &ptr);
   const size_t bytes =
@@ -236,7 +246,7 @@ py::list encode_batch(
   workers = std::max(1, std::min(workers, static_cast<int>(tasks.size())));
   {
     py::gil_scoped_release release;
-#pragma omp parallel for schedule(static) num_threads(workers)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(workers)
     for (ssize_t i = 0; i < static_cast<ssize_t>(tasks.size()); ++i) {
       streams[static_cast<size_t>(i)] = encode_one(tasks[i], cdf_view);
     }
@@ -278,7 +288,7 @@ py::list decode_batch(
   workers = std::max(1, std::min(workers, static_cast<int>(tasks.size())));
   {
     py::gil_scoped_release release;
-#pragma omp parallel for schedule(static) num_threads(workers)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(workers)
     for (ssize_t i = 0; i < static_cast<ssize_t>(tasks.size()); ++i) {
       outputs[static_cast<size_t>(i)] =
           decode_one(streams[static_cast<size_t>(i)], tasks[i], cdf_view);

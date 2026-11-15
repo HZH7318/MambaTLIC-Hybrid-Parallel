@@ -63,6 +63,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         use_native_entropy: bool = True,
         use_searchsorted_indexes: bool = False,
         defer_native_encode: bool = False,
+        fuse_symbol_packing: bool = False,
         tail_embedding_dim: int = 16,
         *args,
         **kwargs,
@@ -85,8 +86,11 @@ class HybridParallelLossyCompressor(LossyCompressor):
         self.use_native_entropy = bool(use_native_entropy)
         self.use_searchsorted_indexes = bool(use_searchsorted_indexes)
         self.defer_native_encode = bool(defer_native_encode)
+        self.fuse_symbol_packing = bool(fuse_symbol_packing)
         if self.defer_native_encode and not self.use_native_entropy:
             raise ValueError("Deferred entropy encoding requires the native backend")
+        if self.fuse_symbol_packing and not self.defer_native_encode:
+            raise ValueError("Fused symbol packing requires deferred native encoding")
         if self.use_native_entropy and not native_rans_openmp_enabled:
             raise RuntimeError("The native tail entropy backend lacks OpenMP support")
         self._native_cdf_cache = None
@@ -320,6 +324,25 @@ class HybridParallelLossyCompressor(LossyCompressor):
                 for value, index, mean in tasks
             ]
 
+        profile_native = bool(getattr(self, "_profile_native_entropy", False))
+        native_profile = {}
+        reference = tasks[0][0]
+
+        def native_start():
+            if profile_native and reference.is_cuda:
+                torch.cuda.synchronize(reference.device)
+            return time.perf_counter()
+
+        def native_end(name, started):
+            if not profile_native:
+                return
+            if reference.is_cuda:
+                torch.cuda.synchronize(reference.device)
+            native_profile[name] = time.perf_counter() - started
+
+        native_started = native_start()
+        value_rows: List[Tensor] = []
+        mean_rows: List[Tensor] = []
         symbol_rows: List[Tensor] = []
         index_rows: List[Tensor] = []
         task_batches: List[int] = []
@@ -327,20 +350,49 @@ class HybridParallelLossyCompressor(LossyCompressor):
         for values, indexes, means in tasks:
             if values.shape != indexes.shape or values.shape != means.shape:
                 raise ValueError("Entropy task value/index/mean shapes must match")
-            symbols = self.gaussian_conditional.quantize(values, "symbols", means)
+            symbols = None
+            if not self.fuse_symbol_packing:
+                symbols = self.gaussian_conditional.quantize(
+                    values, "symbols", means
+                )
             task_batches.append(values.shape[0])
             for sample in range(values.shape[0]):
-                symbol_row = symbols[sample].reshape(-1)
                 index_row = indexes[sample].reshape(-1)
-                if symbol_row.numel() != index_row.numel():
+                if self.fuse_symbol_packing:
+                    value_row = values[sample].reshape(-1)
+                    mean_row = means[sample].reshape(-1)
+                    value_rows.append(value_row)
+                    mean_rows.append(mean_row)
+                    row_length = value_row.numel()
+                else:
+                    symbol_row = symbols[sample].reshape(-1)
+                    symbol_rows.append(symbol_row)
+                    row_length = symbol_row.numel()
+                if row_length != index_row.numel():
                     raise ValueError("Entropy task symbol/index sizes must match")
-                symbol_rows.append(symbol_row)
                 index_rows.append(index_row)
-                row_lengths.append(symbol_row.numel())
+                row_lengths.append(row_length)
+
+        if self.fuse_symbol_packing:
+            # Quantization is element-wise.  Concatenating first makes the 14
+            # heterogeneous entropy tasks share one subtract/round/int path
+            # while preserving the exact task-major, sample-major order.
+            packed_symbols = torch.round(
+                torch.cat(value_rows) - torch.cat(mean_rows)
+            ).int()
+        else:
+            packed_symbols = torch.cat(symbol_rows).int()
 
         packed = torch.stack(
-            [torch.cat(symbol_rows), torch.cat(index_rows)], dim=0
-        ).int().cpu().numpy()
+            [packed_symbols, torch.cat(index_rows).int()], dim=0
+        )
+        native_end("y_symbol_quantization_packing", native_started)
+
+        native_started = native_start()
+        packed = packed.cpu().numpy()
+        native_end("y_device_to_host", native_started)
+
+        native_started = native_start()
         symbol_arrays = []
         index_arrays = []
         start = 0
@@ -351,6 +403,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
             start = end
 
         cdf, cdf_lengths, offsets = self._native_cdf_tables()
+        native_end("y_host_views_and_cdf", native_started)
+
+        native_started = native_start()
         flat_strings = native_rans_encode_batch(
             symbol_arrays,
             index_arrays,
@@ -359,6 +414,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
             offsets,
             self.entropy_workers,
         )
+        native_end("y_native_rans_encode", native_started)
+        if profile_native:
+            self._last_native_encode_profile = native_profile
         grouped_strings: List[List[bytes]] = []
         start = 0
         for batch in task_batches:
@@ -633,20 +691,51 @@ class HybridParallelLossyCompressor(LossyCompressor):
         ]
         return y_hat, strings
 
-    def compress(self, x: Tensor, return_debug: bool = False):
+    def compress(
+        self,
+        x: Tensor,
+        return_debug: bool = False,
+        profile_stages: bool = False,
+    ):
+        stage_profile = {}
+
+        def stage_start():
+            if profile_stages and x.is_cuda:
+                torch.cuda.synchronize(x.device)
+            return time.perf_counter()
+
+        def stage_end(name, started):
+            if not profile_stages:
+                return
+            if x.is_cuda:
+                torch.cuda.synchronize(x.device)
+            stage_profile[name] = stage_profile.get(name, 0.0) + (
+                time.perf_counter() - started
+            )
+
+        profile_started = stage_start()
+        stage_started = stage_start()
         y_enc_start = time.perf_counter()
         y = self.encoder(x)
         y_enc = time.perf_counter() - y_enc_start
+        stage_end("analysis_transform", stage_started)
 
+        stage_started = stage_start()
         z_enc_start = time.perf_counter()
         z = self.hyperencoder(y)
         z_enc = time.perf_counter() - z_enc_start
+        stage_end("hyper_analysis", stage_started)
+
+        stage_started = stage_start()
         z_strings = self.entropy_bottleneck.compress(z)
         z_hat = self.entropy_bottleneck.decompress(z_strings, z.size()[-2:])
+        stage_end("z_entropy_roundtrip", stage_started)
 
+        stage_started = stage_start()
         z_dec_start = time.perf_counter()
         latent_means, latent_scales = self.hyperdecoder(z_hat)
         z_dec = time.perf_counter() - z_dec_start
+        stage_end("hyper_synthesis", stage_started)
 
         params_start = time.perf_counter()
         y_slices = torch.split(y, self.groups[1:], dim=1)
@@ -656,6 +745,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         y_hat_prefix: List[Tensor] = []
         y_strings: List[List[List[bytes]]] = []
         deferred_tasks: List[EntropyTask] = []
+        stage_started = stage_start()
         for index, y_slice in enumerate(prefix_slices):
             if self.defer_native_encode:
                 y_hat_slice, group_tasks = self._prepare_prefix_group(
@@ -676,8 +766,10 @@ class HybridParallelLossyCompressor(LossyCompressor):
                 )
                 y_strings.append(group_strings)
             y_hat_prefix.append(y_hat_slice)
+        stage_end("prefix_probability_quantization", stage_started)
 
         # Tail anchor stage: one shared network pass, four independent streams.
+        stage_started = stage_start()
         prefix_context = self.tail_prefix_transform(torch.cat(y_hat_prefix, dim=1))
         tail_support = self._tail_support(
             prefix_context, latent_means, latent_scales
@@ -715,8 +807,10 @@ class HybridParallelLossyCompressor(LossyCompressor):
             + means_anchor_packed
         )
         anchor_hat = self._unpack_anchor(anchor_hat_packed)
+        stage_end("tail_anchor_probability_quantization", stage_started)
 
         # Tail non-anchor stage: each branch depends only on its own anchor.
+        stage_started = stage_start()
         masked_context = self.tail_context_prediction(anchor_hat)
         means_non_anchor, scales_non_anchor = self._tail_parameters(
             masked_context, tail_support
@@ -733,7 +827,17 @@ class HybridParallelLossyCompressor(LossyCompressor):
         )
         if self.defer_native_encode:
             deferred_tasks.extend(non_anchor_tasks)
-            encoded_tasks = self._compress_native_tasks(deferred_tasks)
+            stage_end("tail_non_anchor_probability_quantization", stage_started)
+            stage_started = stage_start()
+            if profile_stages:
+                self._profile_native_entropy = True
+            try:
+                encoded_tasks = self._compress_native_tasks(deferred_tasks)
+            finally:
+                self._profile_native_entropy = False
+            stage_end("y_entropy_encode", stage_started)
+            if profile_stages:
+                stage_profile.update(self._last_native_encode_profile)
             prefix_task_count = self.num_prefix_groups * 2
             y_strings = [
                 [encoded_tasks[2 * group], encoded_tasks[2 * group + 1]]
@@ -754,6 +858,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
             tail_non_anchor_strings = self._compress_independent_groups(
                 non_anchor_values, non_anchor_indexes, non_anchor_means
             )
+            stage_end("tail_non_anchor_probability_quantization", stage_started)
             y_strings.extend(
                 [
                     list(pair)
@@ -774,6 +879,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
                 "params": params_time,
             },
         }
+        if profile_stages:
+            stage_end("profiled_total", profile_started)
+            output["stage_profile"] = stage_profile
         if return_debug:
             non_anchor_hat_packed = (
                 torch.round(y_non_anchor_packed - means_non_anchor_packed)
@@ -822,7 +930,13 @@ class HybridParallelLossyCompressor(LossyCompressor):
         )[0]
         return anchor_hat + self._unpack_non_anchor(non_anchor_hat_packed)
 
-    def decompress(self, strings, shape, return_debug: bool = False):
+    def decompress(
+        self,
+        strings,
+        shape,
+        return_debug: bool = False,
+        profile_stages: bool = False,
+    ):
         if not isinstance(strings, list) or len(strings) != 2:
             raise ValueError("strings must be [y_strings, z_strings].")
         y_strings, z_strings = strings
@@ -831,10 +945,36 @@ class HybridParallelLossyCompressor(LossyCompressor):
                 f"Expected {len(HYBRID_GROUPS)} y groups, got {len(y_strings)}."
             )
 
+        # A model parameter is a reliable device reference even when a
+        # CompressAI table happens to remain on CPU in a particular version.
+        reference = next(self.parameters())
+        stage_profile = {}
+
+        def stage_start():
+            if profile_stages and reference.is_cuda:
+                torch.cuda.synchronize(reference.device)
+            return time.perf_counter()
+
+        def stage_end(name, started):
+            if not profile_stages:
+                return
+            if reference.is_cuda:
+                torch.cuda.synchronize(reference.device)
+            stage_profile[name] = stage_profile.get(name, 0.0) + (
+                time.perf_counter() - started
+            )
+
+        profile_started = stage_start()
+        stage_started = stage_start()
         z_hat = self.entropy_bottleneck.decompress(z_strings, shape)
+        stage_end("z_entropy_decode", stage_started)
+
+        stage_started = stage_start()
         latent_means, latent_scales = self.hyperdecoder(z_hat)
+        stage_end("hyper_synthesis", stage_started)
 
         y_hat_prefix: List[Tensor] = []
+        stage_started = stage_start()
         for index in range(self.num_prefix_groups):
             y_hat_prefix.append(
                 self._decompress_prefix_group(
@@ -845,7 +985,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
                     latent_scales,
                 )
             )
+        stage_end("prefix_probability_entropy_decode", stage_started)
 
+        stage_started = stage_start()
         prefix_context = self.tail_prefix_transform(torch.cat(y_hat_prefix, dim=1))
         tail_support = self._tail_support(
             prefix_context, latent_means, latent_scales
@@ -871,8 +1013,10 @@ class HybridParallelLossyCompressor(LossyCompressor):
             anchor_strings, anchor_indexes, anchor_means
         )
         anchor_hat = self._unpack_anchor(torch.cat(anchor_hat_groups, dim=0))
+        stage_end("tail_anchor_probability_entropy_decode", stage_started)
 
         # Decode four independent non-anchor streams after the anchor stage.
+        stage_started = stage_start()
         masked_context = self.tail_context_prediction(anchor_hat)
         means_non_anchor, scales_non_anchor = self._tail_parameters(
             masked_context, tail_support
@@ -889,16 +1033,22 @@ class HybridParallelLossyCompressor(LossyCompressor):
         non_anchor_hat = self._unpack_non_anchor(
             torch.cat(non_anchor_hat_groups, dim=0)
         )
+        stage_end("tail_non_anchor_probability_entropy_decode", stage_started)
 
         tail_hat_slices = list(
             torch.split(anchor_hat + non_anchor_hat, batch, dim=0)
         )
         y_hat = torch.cat(y_hat_prefix + tail_hat_slices, dim=1)
 
+        stage_started = stage_start()
         y_dec_start = time.perf_counter()
         x_hat = self.decoder(y_hat).clamp_(0, 1)
         y_dec = time.perf_counter() - y_dec_start
+        stage_end("synthesis_transform", stage_started)
         output = {"x_hat": x_hat, "time": {"y_dec": y_dec}}
+        if profile_stages:
+            stage_end("profiled_total", profile_started)
+            output["stage_profile"] = stage_profile
         if return_debug:
             output["debug_y_hat"] = y_hat
         return output
@@ -916,6 +1066,7 @@ class HNet(nn.Sequential):
         use_native_entropy: bool = True,
         use_searchsorted_indexes: bool = False,
         defer_native_encode: bool = False,
+        fuse_symbol_packing: bool = False,
     ) -> None:
         super().__init__()
         self.net = HybridParallelLossyCompressor(
@@ -926,6 +1077,7 @@ class HNet(nn.Sequential):
             use_native_entropy=use_native_entropy,
             use_searchsorted_indexes=use_searchsorted_indexes,
             defer_native_encode=defer_native_encode,
+            fuse_symbol_packing=fuse_symbol_packing,
         )
 
     def forward(self, x: Tensor):
