@@ -24,30 +24,30 @@
       "dataset": "landsat8",
       "lambda": 16384,
       "images": 30,
-      "compress_mean_s": 0.06591547712062797,
-      "compress_median_s": 0.06582660274580121,
-      "decompress_mean_s": 0.06529676653444767,
-      "decompress_median_s": 0.06534028565511107,
+      "compress_mean_s": 0.03785828488568465,
+      "compress_median_s": 0.037284985184669495,
+      "decompress_mean_s": 0.03562618102878332,
+      "decompress_median_s": 0.034983303397893906,
       "bpp": 0.5515299479166667,
       "psnr": 45.3345344543457,
       "ms_ssim_db": 23.079632504781088,
       "latent_exact": true,
-      "codec_note": "native repository codec"
+      "codec_note": "native rANS for prefix and tail"
     },
     {
       "method": "hybrid_native_4w",
       "dataset": "landsat8",
       "lambda": 16384,
       "images": 30,
-      "compress_mean_s": 0.06582785121475657,
-      "compress_median_s": 0.06579737644642591,
-      "decompress_mean_s": 0.06542374159519872,
-      "decompress_median_s": 0.06544029014185071,
+      "compress_mean_s": 0.037231234398980934,
+      "compress_median_s": 0.0366030428558588,
+      "decompress_mean_s": 0.0358505296210448,
+      "decompress_median_s": 0.03544866666197777,
       "bpp": 0.5515299479166667,
       "psnr": 45.3345344543457,
       "ms_ssim_db": 23.079632504781088,
       "latent_exact": true,
-      "codec_note": "native OpenMP multi-stream rANS"
+      "codec_note": "native prefix rANS and OpenMP tail multi-stream rANS"
     }
   ],
   "primary_files": [

@@ -294,7 +294,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
         indexes: Sequence[Tensor],
         means: Sequence[Tensor],
     ) -> List[List[bytes]]:
-        if len(values) <= 1 or not self.use_native_entropy:
+        if not values:
+            return []
+        if not self.use_native_entropy:
             return [
                 self.gaussian_conditional.compress(value, index, means=mean)
                 for value, index, mean in zip(values, indexes, means)
@@ -333,7 +335,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
         indexes: Sequence[Tensor],
         means: Sequence[Tensor],
     ) -> List[Tensor]:
-        if len(strings) <= 1 or not self.use_native_entropy:
+        if not strings:
+            return []
+        if not self.use_native_entropy:
             return [
                 self.gaussian_conditional.decompress(stream, index, means=mean)
                 for stream, index, mean in zip(strings, indexes, means)
@@ -508,9 +512,12 @@ class HybridParallelLossyCompressor(LossyCompressor):
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
         indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
-        anchor_strings = self.gaussian_conditional.compress(
-            y_anchor, indexes_anchor, means=means_anchor_packed
-        )
+        # A prefix group is dependency-serial, but its rANS operation does not
+        # need CompressAI's Python/list conversion path.  Native modes use the
+        # same numpy/pybind backend as the parallel tail (with one task here).
+        anchor_strings = self._compress_independent_groups(
+            (y_anchor,), (indexes_anchor,), (means_anchor_packed,)
+        )[0]
         anchor_hat_packed = torch.round(y_anchor - means_anchor_packed) + means_anchor_packed
         anchor_hat = self._unpack_anchor(anchor_hat_packed)
 
@@ -524,11 +531,11 @@ class HybridParallelLossyCompressor(LossyCompressor):
         indexes_non_anchor = self.gaussian_conditional.build_indexes(
             scales_non_anchor_packed
         )
-        non_anchor_strings = self.gaussian_conditional.compress(
-            y_non_anchor,
-            indexes_non_anchor,
-            means=means_non_anchor_packed,
-        )
+        non_anchor_strings = self._compress_independent_groups(
+            (y_non_anchor,),
+            (indexes_non_anchor,),
+            (means_non_anchor_packed,),
+        )[0]
         non_anchor_hat_packed = (
             torch.round(y_non_anchor - means_non_anchor_packed)
             + means_non_anchor_packed
@@ -665,9 +672,9 @@ class HybridParallelLossyCompressor(LossyCompressor):
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
         indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
-        anchor_hat_packed = self.gaussian_conditional.decompress(
-            group_strings[0], indexes_anchor, means=means_anchor_packed
-        )
+        anchor_hat_packed = self._decompress_independent_groups(
+            (group_strings[0],), (indexes_anchor,), (means_anchor_packed,)
+        )[0]
         anchor_hat = self._unpack_anchor(anchor_hat_packed)
 
         masked_context = self.context_prediction[index](anchor_hat)
@@ -679,11 +686,11 @@ class HybridParallelLossyCompressor(LossyCompressor):
         indexes_non_anchor = self.gaussian_conditional.build_indexes(
             scales_non_anchor_packed
         )
-        non_anchor_hat_packed = self.gaussian_conditional.decompress(
-            group_strings[1],
-            indexes_non_anchor,
-            means=means_non_anchor_packed,
-        )
+        non_anchor_hat_packed = self._decompress_independent_groups(
+            (group_strings[1],),
+            (indexes_non_anchor,),
+            (means_non_anchor_packed,),
+        )[0]
         return anchor_hat + self._unpack_non_anchor(non_anchor_hat_packed)
 
     def decompress(self, strings, shape, return_debug: bool = False):

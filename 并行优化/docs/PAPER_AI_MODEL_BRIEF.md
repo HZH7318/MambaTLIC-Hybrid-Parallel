@@ -154,26 +154,26 @@ MS-SSIM:    16.082 -- 26.590 dB
 
 ### 6.2 真实 codec 延迟先导实验
 
-当前 Landsat8 `lambda=16384` 上的先导试验使用 1 张预热和 5 张正式计时图像。时间包含完整 `compress()` 和 `decompress()` 调用，计时前后执行 CUDA synchronize。
+当前 Landsat8 `lambda=16384` 的 Hybrid 正式结果使用 5 张预热和 30 张正式计时图像。时间包含完整 `compress()` 和 `decompress()` 调用，计时前后执行 CUDA synchronize。原始 Mamba 和 HPCM 行仍是 1 张预热、5 张计时的先导结果，只能用于初步定位，不是完全匹配的最终比较。
 
 | 运行方式 | 压缩时间 | 解压时间 | 真实 BPP | PSNR | MS-SSIM(dB) |
 |---|---:|---:|---:|---:|---:|
-| Hybrid Python serial entropy | 0.11065 s | 0.11885 s | 0.80430 | 41.894 | 21.085 |
-| Hybrid native rANS, 1 worker | 0.06639 s | 0.06621 s | 0.80430 | 41.894 | 21.085 |
-| Hybrid native rANS, 4 workers | 0.06609 s | 0.06607 s | 0.80430 | 41.894 | 21.085 |
+| Hybrid Python serial entropy | 0.11067 s | 0.11753 s | 0.55153 | 45.335 | 23.080 |
+| Hybrid native rANS, 1 worker | 0.03786 s | 0.03563 s | 0.55153 | 45.335 | 23.080 |
+| Hybrid native rANS, 4 workers | 0.03723 s | 0.03585 s | 0.55153 | 45.335 | 23.080 |
 | Original serial Mamba | 0.18803 s | 0.12630 s | 0.72617 | 42.924 | 21.852 |
 | HPCM | 0.02499 s | 0.02348 s | 0.81231 | 42.583 | 21.640 |
 
 目前可得出的事实：
 
-- Native 4-worker 相对 Hybrid Python 熵编码完整路径，压缩约 `1.67x`，解压约 `1.80x`；
-- Native 4-worker 与 Native 1-worker 的完整时间几乎相同，仅约 `1.00x`；
-- Hybrid Native 4-worker 相对原始 Mamba 的完整压缩/解压时间分别约为 `2.85x/1.91x`，但两者 RD 点不一致，不能将此写成同等质量下的严格加速比；
+- Native 4-worker 相对 Hybrid Python 熵编码完整路径，压缩约 `2.97x`，解压约 `3.28x`；
+- Native 4-worker 与 Native 1-worker 的完整时间仍基本相同：压缩约 `1.02x`，解压无稳定收益；
+- Hybrid Native 4-worker 相对原始 Mamba 的先导时间约为 `5.05x/3.52x`，但测试图像数和 RD 点均未严格匹配，不能将此写成同等质量下的最终加速比；
 - 已验证 Hybrid Python、Native 1-worker 和 Native 4-worker 三者的 BPP、PSNR 和 MS-SSIM 完全一致；
 - 已通过编码端/解码端量化 latent 逐元素一致性检查；
-- HPCM 当前仍明显更快，因此暂不能声称整体编解码速度达到 SOTA。
+- HPCM 的 5 张先导时间仍更低，因此暂不能声称整体编解码速度达到 SOTA；最终需要按同一 30 张图像协议重测。
 
-4-worker 没有继续快于 1-worker，说明当前主要收益来自 batched native API、减少 Python/C++ 边界开销和数据整理，而不是四条 rANS 线程本身带来的线性加速。小码流粒度、CPU 线程调度、GPU 概率参数预测、CPU/GPU 数据转换和前后处理都会限制并行收益。
+Native 路径现已同时覆盖串行前缀和并行尾部码流，因而避免了前缀 6 条码流中 CompressAI 的逐流 Python/list 转换开销。4-worker 仍没有明显快于 1-worker，说明当前主要收益来自原生 rANS API 和减少 Python/C++ 数据整理，而不是四条 rANS 线程本身带来的线性加速。尾部 rANS 只占完整 codec 很小一部分，剩余时间主要在 GPU 概率参数预测、串行前缀依赖、CPU/GPU 数据转换和主变换网络。
 
 ## 7. 论文中应该如何表述
 
