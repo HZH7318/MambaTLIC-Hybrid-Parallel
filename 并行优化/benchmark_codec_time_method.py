@@ -177,6 +177,15 @@ def load_model(args):
         scale_table = torch.exp(torch.linspace(math.log(0.12), math.log(64.0), 60))
         model.update(scale_table)
     model.eval().to(args.device)
+    if args.method == "hpcm" and hasattr(model, "adaptive_params_list"):
+        # HPCM stores these Parameters in a plain Python list, so Module.to()
+        # cannot discover or move them away from the constructor's cuda:0.
+        model.adaptive_params_list = [
+            torch.nn.Parameter(
+                parameter.detach().to(args.device), requires_grad=False
+            )
+            for parameter in model.adaptive_params_list
+        ]
     if args.method not in ("hl", "hpcm") and hasattr(model, "update"):
         try:
             model.update(force=True)

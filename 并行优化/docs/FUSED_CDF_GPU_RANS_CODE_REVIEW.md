@@ -395,3 +395,23 @@ bash 并行优化/run_codec_benchmark.sh \
 - 当前最快实现为 P2-4T，但完整收益仍主要来自 P1 的 scale-index 替换；
 - 应先补齐 P0 精确阶段表和多次重复统计，再决定是否进入 P3 Triton fused packing；
 - 现有结果进一步证明 GPU Tail-rANS 不应作为当前第一优先级。
+
+### 10.5 与 HPCM 的同协议重测
+
+之前 HPCM 只有 1 张预热、5 张计时的先导数据，不能与 Hybrid 30 图结果直接严格比较。现已使用同一批 Landsat8 图像、5 张预热、30 张计时、同一 CUDA 同步边界重测 HPCM：
+
+| Method | Enc. mean | Dec. mean | BPP | PSNR | MS-SSIM(dB) |
+|---|---:|---:|---:|---:|---:|
+| HPCM | **25.81 ms** | **24.10 ms** | **0.545280** | 45.3036 | **23.1346** |
+| Hybrid P2-4T | 26.76 ms | 25.62 ms | 0.551530 | **45.3345** | 23.0796 |
+
+在这一接近的 RD 工作点上：
+
+- Hybrid P2-4T 压缩时间比 HPCM 高约 `3.68%`；
+- Hybrid P2-4T 解压时间比 HPCM 高约 `6.32%`；
+- Hybrid 的 BPP 高约 `1.15%`，PSNR 高约 `0.031 dB`；
+- HPCM 的 MS-SSIM(dB) 高约 `0.055 dB`。
+
+因此，在统一测试协议后，当前 Hybrid 已从“明显慢于 HPCM”改善为“延迟接近 HPCM”。两者仍不是完全相同的 RD 点，所以论文中应报告完整数值，不应简化为同质量胜负。
+
+此结果也使 GPU Tail-rANS 的优先级进一步降低：在投入 GPU coder 开发前，应先补齐 P0 阶段表，并验证剩余约 1–2 ms 差距是来自概率网络、主变换还是数据同步。
