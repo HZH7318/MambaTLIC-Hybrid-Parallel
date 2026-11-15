@@ -315,3 +315,83 @@ P5  若低层收益到顶，转Hybrid-V2
 3. GPU rANS 必须由阶段占比触发，不应作为默认必做项。
 
 因此，该方向值得继续，但应先使用低风险等价替换和真实阶段数据筛选优化项，避免在仅占零点几毫秒的 rANS 内核上过早投入大量 GPU coder 开发工作。
+
+## 10. P1/P2 实际实现与结果
+
+根据上述调研，已以显式开关方式实现：
+
+- P1：全部 8 个概率阶段使用 `torch.searchsorted` 生成 scale index；
+- P2：编码端延迟提交 6 条前缀流和 8 条尾部流，symbols/indexes 合并为一次 GPU→CPU 转换和一次 pybind 调用。
+
+默认 A0 路径保持关闭开关，不会在加载旧配置时自动改变 codec 行为。
+
+### 10.1 30 张真实码流结果
+
+测试条件：Landsat8、`lambda=16384`、5 张预热、30 张正式计时图像，完整 `compress()`/`decompress()` 边界前后同步 CUDA。
+
+| Method | Workers | Enc. mean | Dec. mean | BPP | PSNR | MS-SSIM(dB) | Latent exact |
+|---|---:|---:|---:|---:|---:|---:|:---:|
+| A0 Native current | 1 | 37.86 ms | 35.63 ms | 0.551530 | 45.3345 | 23.0796 | yes |
+| P1 Searchsorted | 1 | 28.30 ms | 26.03 ms | 0.551530 | 45.3345 | 23.0796 | yes |
+| P2 Searchsorted + 14 streams | 1 | 27.41 ms | 25.93 ms | 0.551530 | 45.3345 | 23.0796 | yes |
+| P2 Searchsorted + 14 streams | 4 | **26.76 ms** | **25.62 ms** | 0.551530 | 45.3345 | 23.0796 | yes |
+
+其中 A0 是仓库已有的 30 图正式基线；P1/P2 使用同一 checkpoint、图像顺序和计时边界。
+
+收益：
+
+- P1 相对 A0：压缩下降 `25.24%`，解压下降 `26.94%`；
+- P2-1T 相对 P1：压缩再下降 `3.14%`；
+- P2-4T 相对 P1：压缩再下降 `5.44%`；
+- P2-4T 相对 A0：压缩下降 `29.31%`，解压下降 `28.08%`；
+- P2-4T 相对 Python 串行熵编码路径：完整压缩/解压约为 `4.14×/4.59×`。
+
+P2 只修改编码端的任务提交，因此解压时间与 P1 之间的小幅差异应视为测试波动，不应写成 P2 的解码加速收益。
+
+### 10.2 字节级正确性
+
+对同一 checkpoint 和同一张真实 Landsat8 图像，在同一模型实例中依次切换 A0、P1 和 P2：
+
+```text
+A0 streams=15 bytes=7500 bitstream_equal_A0=true latent_exact=true
+P1 streams=15 bytes=7500 bitstream_equal_A0=true latent_exact=true
+P2 streams=15 bytes=7500 bitstream_equal_A0=true latent_exact=true
+```
+
+验证项包括：
+
+- 14 条 y 码流和 1 条 z 码流的数量一致；
+- 每条码流字节完全一致；
+- 编码端量化 latent 与 A0 一致；
+- 解码端 latent 与编码端逐元素一致。
+
+### 10.3 可复现命令
+
+```bash
+# A0
+bash 并行优化/run_codec_benchmark.sh \
+  --method hybrid_native_1w --dataset landsat8 \
+  --lambda-value 16384 --warmup-images 5 --num-images 30 --device cuda:0
+
+# P1
+bash 并行优化/run_codec_benchmark.sh \
+  --method hybrid_searchsorted_1w --dataset landsat8 \
+  --lambda-value 16384 --warmup-images 5 --num-images 30 --device cuda:0
+
+# P2-1T / P2-4T
+bash 并行优化/run_codec_benchmark.sh \
+  --method hybrid_searchsorted_14stream_1w --dataset landsat8 \
+  --lambda-value 16384 --warmup-images 5 --num-images 30 --device cuda:0
+
+bash 并行优化/run_codec_benchmark.sh \
+  --method hybrid_searchsorted_14stream_4w --dataset landsat8 \
+  --lambda-value 16384 --warmup-images 5 --num-images 30 --device cuda:0
+```
+
+### 10.4 当前决策
+
+- P1 超过原定完整时间下降 3% 的 Go 门槛，应保留；
+- P2-1T 达到编码时间下降 3% 的 Go 门槛，P2-4T 超过 5%，应保留；
+- 当前最快实现为 P2-4T，但完整收益仍主要来自 P1 的 scale-index 替换；
+- 应先补齐 P0 精确阶段表和多次重复统计，再决定是否进入 P3 Triton fused packing；
+- 现有结果进一步证明 GPU Tail-rANS 不应作为当前第一优先级。

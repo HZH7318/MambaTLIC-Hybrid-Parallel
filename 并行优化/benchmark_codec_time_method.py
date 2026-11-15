@@ -36,6 +36,9 @@ def arguments():
             "mamba_serial", "hybrid_1w", "hybrid_4w",
             "hybrid_batched_multistream", "hybrid_python_serial",
             "hybrid_native_1w", "hybrid_native_4w",
+            "hybrid_searchsorted_1w",
+            "hybrid_searchsorted_14stream_1w",
+            "hybrid_searchsorted_14stream_4w",
         ),
     )
     parser.add_argument("--dataset", required=True, choices=("landsat8", "rs"))
@@ -73,6 +76,9 @@ def load_model(args):
         "mamba_serial", "hybrid_1w", "hybrid_4w",
         "hybrid_batched_multistream", "hybrid_python_serial",
         "hybrid_native_1w", "hybrid_native_4w",
+        "hybrid_searchsorted_1w",
+        "hybrid_searchsorted_14stream_1w",
+        "hybrid_searchsorted_14stream_4w",
     ):
         project_root = Path("/data/huzhenghao/ml/h")
         sys.path.insert(0, str(project_root))
@@ -87,13 +93,22 @@ def load_model(args):
             from mambamodel_hybrid_parallel import HNet
 
             python_serial = args.method == "hybrid_python_serial"
-            one_worker = args.method in ("hybrid_1w", "hybrid_native_1w")
+            one_worker = args.method in (
+                "hybrid_1w",
+                "hybrid_native_1w",
+                "hybrid_searchsorted_1w",
+                "hybrid_searchsorted_14stream_1w",
+            )
+            searchsorted_indexes = args.method.startswith("hybrid_searchsorted_")
+            defer_native_encode = "14stream" in args.method
             wrapper = HNet(
                 192,
                 320,
                 channels,
                 entropy_workers=1 if one_worker or python_serial else 4,
                 use_native_entropy=not python_serial,
+                use_searchsorted_indexes=searchsorted_indexes,
+                defer_native_encode=defer_native_encode,
             )
             mappings = {
                 ("landsat8", 16384): OPT_ROOT / "experiments/train/20261019_0334_16384/bestmodel.pth",
@@ -263,7 +278,12 @@ def main():
             else "native vectorized rANS"
             if args.method == "ftic"
             else "native OpenMP multi-stream rANS"
-            if args.method in ("hybrid_native_4w", "hybrid_batched_multistream", "hybrid_4w")
+            if args.method in (
+                "hybrid_native_4w",
+                "hybrid_batched_multistream",
+                "hybrid_4w",
+                "hybrid_searchsorted_14stream_4w",
+            )
             else "native repository codec"
         ),
     }

@@ -48,6 +48,7 @@ from model.mamba.mambamodel_1_917 import (
 PREFIX_GROUPS: Tuple[int, ...] = (16, 16, 32)
 TAIL_GROUPS: Tuple[int, ...] = (64, 64, 64, 64)
 HYBRID_GROUPS: Tuple[int, ...] = PREFIX_GROUPS + TAIL_GROUPS
+EntropyTask = Tuple[Tensor, Tensor, Tensor]
 
 
 class HybridParallelLossyCompressor(LossyCompressor):
@@ -60,6 +61,8 @@ class HybridParallelLossyCompressor(LossyCompressor):
         base_channel: int,
         entropy_workers: int = 4,
         use_native_entropy: bool = True,
+        use_searchsorted_indexes: bool = False,
+        defer_native_encode: bool = False,
         tail_embedding_dim: int = 16,
         *args,
         **kwargs,
@@ -80,6 +83,10 @@ class HybridParallelLossyCompressor(LossyCompressor):
         self.tail_channels = TAIL_GROUPS[0]
         self.entropy_workers = max(1, int(entropy_workers))
         self.use_native_entropy = bool(use_native_entropy)
+        self.use_searchsorted_indexes = bool(use_searchsorted_indexes)
+        self.defer_native_encode = bool(defer_native_encode)
+        if self.defer_native_encode and not self.use_native_entropy:
+            raise ValueError("Deferred entropy encoding requires the native backend")
         if self.use_native_entropy and not native_rans_openmp_enabled:
             raise RuntimeError("The native tail entropy backend lacks OpenMP support")
         self._native_cdf_cache = None
@@ -288,6 +295,77 @@ class HybridParallelLossyCompressor(LossyCompressor):
             torch.cat([spatial_context, tail_support], dim=1)
         ).chunk(2, dim=1)
 
+    def _build_indexes(self, scales: Tensor) -> Tensor:
+        """Build Gaussian CDF indexes with an optional one-op search path."""
+        if not self.use_searchsorted_indexes:
+            return self.gaussian_conditional.build_indexes(scales)
+        conditional = self.gaussian_conditional
+        bounded = conditional.lower_bound_scale(scales)
+        indexes = torch.searchsorted(
+            conditional.scale_table,
+            bounded.contiguous(),
+            right=False,
+        )
+        return indexes.clamp_max_(len(conditional.scale_table) - 1).int()
+
+    def _compress_native_tasks(
+        self, tasks: Sequence[EntropyTask]
+    ) -> List[List[bytes]]:
+        """Encode heterogeneous tasks with one device transfer and pybind call."""
+        if not tasks:
+            return []
+        if not self.use_native_entropy:
+            return [
+                self.gaussian_conditional.compress(value, index, means=mean)
+                for value, index, mean in tasks
+            ]
+
+        symbol_rows: List[Tensor] = []
+        index_rows: List[Tensor] = []
+        task_batches: List[int] = []
+        row_lengths: List[int] = []
+        for values, indexes, means in tasks:
+            if values.shape != indexes.shape or values.shape != means.shape:
+                raise ValueError("Entropy task value/index/mean shapes must match")
+            symbols = self.gaussian_conditional.quantize(values, "symbols", means)
+            task_batches.append(values.shape[0])
+            for sample in range(values.shape[0]):
+                symbol_row = symbols[sample].reshape(-1)
+                index_row = indexes[sample].reshape(-1)
+                if symbol_row.numel() != index_row.numel():
+                    raise ValueError("Entropy task symbol/index sizes must match")
+                symbol_rows.append(symbol_row)
+                index_rows.append(index_row)
+                row_lengths.append(symbol_row.numel())
+
+        packed = torch.stack(
+            [torch.cat(symbol_rows), torch.cat(index_rows)], dim=0
+        ).int().cpu().numpy()
+        symbol_arrays = []
+        index_arrays = []
+        start = 0
+        for length in row_lengths:
+            end = start + length
+            symbol_arrays.append(packed[0, start:end])
+            index_arrays.append(packed[1, start:end])
+            start = end
+
+        cdf, cdf_lengths, offsets = self._native_cdf_tables()
+        flat_strings = native_rans_encode_batch(
+            symbol_arrays,
+            index_arrays,
+            cdf,
+            cdf_lengths,
+            offsets,
+            self.entropy_workers,
+        )
+        grouped_strings: List[List[bytes]] = []
+        start = 0
+        for batch in task_batches:
+            grouped_strings.append(flat_strings[start : start + batch])
+            start += batch
+        return grouped_strings
+
     def _compress_independent_groups(
         self,
         values: Sequence[Tensor],
@@ -495,14 +573,14 @@ class HybridParallelLossyCompressor(LossyCompressor):
             "img_likelihoods": {"y": y_likelihoods, "z": z_likelihoods},
         }
 
-    def _compress_prefix_group(
+    def _prepare_prefix_group(
         self,
         index: int,
         y_slice: Tensor,
         y_hat_prefix: Sequence[Tensor],
         latent_means: Tensor,
         latent_scales: Tensor,
-    ) -> Tuple[Tensor, List[List[bytes]]]:
+    ) -> Tuple[Tensor, List[EntropyTask]]:
         support = self._prefix_support(
             index, y_hat_prefix, latent_means, latent_scales
         )
@@ -511,13 +589,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         y_anchor = self._pack_anchor(y_slice)
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
-        indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
-        # A prefix group is dependency-serial, but its rANS operation does not
-        # need CompressAI's Python/list conversion path.  Native modes use the
-        # same numpy/pybind backend as the parallel tail (with one task here).
-        anchor_strings = self._compress_independent_groups(
-            (y_anchor,), (indexes_anchor,), (means_anchor_packed,)
-        )[0]
+        indexes_anchor = self._build_indexes(scales_anchor_packed)
         anchor_hat_packed = torch.round(y_anchor - means_anchor_packed) + means_anchor_packed
         anchor_hat = self._unpack_anchor(anchor_hat_packed)
 
@@ -528,20 +600,38 @@ class HybridParallelLossyCompressor(LossyCompressor):
         y_non_anchor = self._pack_non_anchor(y_slice)
         means_non_anchor_packed = self._pack_non_anchor(means_non_anchor)
         scales_non_anchor_packed = self._pack_non_anchor(scales_non_anchor)
-        indexes_non_anchor = self.gaussian_conditional.build_indexes(
-            scales_non_anchor_packed
-        )
-        non_anchor_strings = self._compress_independent_groups(
-            (y_non_anchor,),
-            (indexes_non_anchor,),
-            (means_non_anchor_packed,),
-        )[0]
+        indexes_non_anchor = self._build_indexes(scales_non_anchor_packed)
         non_anchor_hat_packed = (
             torch.round(y_non_anchor - means_non_anchor_packed)
             + means_non_anchor_packed
         )
         y_hat = anchor_hat + self._unpack_non_anchor(non_anchor_hat_packed)
-        return y_hat, [anchor_strings, non_anchor_strings]
+        tasks = [
+            (y_anchor, indexes_anchor, means_anchor_packed),
+            (y_non_anchor, indexes_non_anchor, means_non_anchor_packed),
+        ]
+        return y_hat, tasks
+
+    def _compress_prefix_group(
+        self,
+        index: int,
+        y_slice: Tensor,
+        y_hat_prefix: Sequence[Tensor],
+        latent_means: Tensor,
+        latent_scales: Tensor,
+    ) -> Tuple[Tensor, List[List[bytes]]]:
+        y_hat, tasks = self._prepare_prefix_group(
+            index, y_slice, y_hat_prefix, latent_means, latent_scales
+        )
+        # Preserve the stable A0 behavior: dependency-serial prefix streams are
+        # submitted separately unless the explicit 14-stream path is enabled.
+        strings = [
+            self._compress_independent_groups(
+                (values,), (indexes,), (means,)
+            )[0]
+            for values, indexes, means in tasks
+        ]
+        return y_hat, strings
 
     def compress(self, x: Tensor, return_debug: bool = False):
         y_enc_start = time.perf_counter()
@@ -565,16 +655,27 @@ class HybridParallelLossyCompressor(LossyCompressor):
 
         y_hat_prefix: List[Tensor] = []
         y_strings: List[List[List[bytes]]] = []
+        deferred_tasks: List[EntropyTask] = []
         for index, y_slice in enumerate(prefix_slices):
-            y_hat_slice, group_strings = self._compress_prefix_group(
-                index,
-                y_slice,
-                y_hat_prefix,
-                latent_means,
-                latent_scales,
-            )
+            if self.defer_native_encode:
+                y_hat_slice, group_tasks = self._prepare_prefix_group(
+                    index,
+                    y_slice,
+                    y_hat_prefix,
+                    latent_means,
+                    latent_scales,
+                )
+                deferred_tasks.extend(group_tasks)
+            else:
+                y_hat_slice, group_strings = self._compress_prefix_group(
+                    index,
+                    y_slice,
+                    y_hat_prefix,
+                    latent_means,
+                    latent_scales,
+                )
+                y_strings.append(group_strings)
             y_hat_prefix.append(y_hat_slice)
-            y_strings.append(group_strings)
 
         # Tail anchor stage: one shared network pass, four independent streams.
         prefix_context = self.tail_prefix_transform(torch.cat(y_hat_prefix, dim=1))
@@ -595,14 +696,19 @@ class HybridParallelLossyCompressor(LossyCompressor):
         y_anchor_packed = self._pack_anchor(tail_batch)
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
-        indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
+        indexes_anchor = self._build_indexes(scales_anchor_packed)
 
         anchor_values = torch.split(y_anchor_packed, batch, dim=0)
         anchor_indexes = torch.split(indexes_anchor, batch, dim=0)
         anchor_means = torch.split(means_anchor_packed, batch, dim=0)
-        tail_anchor_strings = self._compress_independent_groups(
-            anchor_values, anchor_indexes, anchor_means
-        )
+        anchor_tasks = list(zip(anchor_values, anchor_indexes, anchor_means))
+        if self.defer_native_encode:
+            deferred_tasks.extend(anchor_tasks)
+            tail_anchor_strings = []
+        else:
+            tail_anchor_strings = self._compress_independent_groups(
+                anchor_values, anchor_indexes, anchor_means
+            )
 
         anchor_hat_packed = (
             torch.round(y_anchor_packed - means_anchor_packed)
@@ -618,19 +724,44 @@ class HybridParallelLossyCompressor(LossyCompressor):
         y_non_anchor_packed = self._pack_non_anchor(tail_batch)
         means_non_anchor_packed = self._pack_non_anchor(means_non_anchor)
         scales_non_anchor_packed = self._pack_non_anchor(scales_non_anchor)
-        indexes_non_anchor = self.gaussian_conditional.build_indexes(
-            scales_non_anchor_packed
-        )
+        indexes_non_anchor = self._build_indexes(scales_non_anchor_packed)
         non_anchor_values = torch.split(y_non_anchor_packed, batch, dim=0)
         non_anchor_indexes = torch.split(indexes_non_anchor, batch, dim=0)
         non_anchor_means = torch.split(means_non_anchor_packed, batch, dim=0)
-        tail_non_anchor_strings = self._compress_independent_groups(
-            non_anchor_values, non_anchor_indexes, non_anchor_means
+        non_anchor_tasks = list(
+            zip(non_anchor_values, non_anchor_indexes, non_anchor_means)
         )
-
-        y_strings.extend(
-            [list(pair) for pair in zip(tail_anchor_strings, tail_non_anchor_strings)]
-        )
+        if self.defer_native_encode:
+            deferred_tasks.extend(non_anchor_tasks)
+            encoded_tasks = self._compress_native_tasks(deferred_tasks)
+            prefix_task_count = self.num_prefix_groups * 2
+            y_strings = [
+                [encoded_tasks[2 * group], encoded_tasks[2 * group + 1]]
+                for group in range(self.num_prefix_groups)
+            ]
+            tail_anchor_start = prefix_task_count
+            tail_non_anchor_start = prefix_task_count + self.num_tail_groups
+            y_strings.extend(
+                [
+                    [
+                        encoded_tasks[tail_anchor_start + group],
+                        encoded_tasks[tail_non_anchor_start + group],
+                    ]
+                    for group in range(self.num_tail_groups)
+                ]
+            )
+        else:
+            tail_non_anchor_strings = self._compress_independent_groups(
+                non_anchor_values, non_anchor_indexes, non_anchor_means
+            )
+            y_strings.extend(
+                [
+                    list(pair)
+                    for pair in zip(
+                        tail_anchor_strings, tail_non_anchor_strings
+                    )
+                ]
+            )
         params_time = time.perf_counter() - params_start
 
         output = {
@@ -671,7 +802,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         means_anchor, scales_anchor = self._prefix_anchor_parameters(index, support)
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
-        indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
+        indexes_anchor = self._build_indexes(scales_anchor_packed)
         anchor_hat_packed = self._decompress_independent_groups(
             (group_strings[0],), (indexes_anchor,), (means_anchor_packed,)
         )[0]
@@ -683,9 +814,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         ).chunk(2, dim=1)
         means_non_anchor_packed = self._pack_non_anchor(means_non_anchor)
         scales_non_anchor_packed = self._pack_non_anchor(scales_non_anchor)
-        indexes_non_anchor = self.gaussian_conditional.build_indexes(
-            scales_non_anchor_packed
-        )
+        indexes_non_anchor = self._build_indexes(scales_non_anchor_packed)
         non_anchor_hat_packed = self._decompress_independent_groups(
             (group_strings[1],),
             (indexes_non_anchor,),
@@ -733,7 +862,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         )
         means_anchor_packed = self._pack_anchor(means_anchor)
         scales_anchor_packed = self._pack_anchor(scales_anchor)
-        indexes_anchor = self.gaussian_conditional.build_indexes(scales_anchor_packed)
+        indexes_anchor = self._build_indexes(scales_anchor_packed)
         anchor_indexes = torch.split(indexes_anchor, batch, dim=0)
         anchor_means = torch.split(means_anchor_packed, batch, dim=0)
         tail_strings = y_strings[self.num_prefix_groups :]
@@ -750,9 +879,7 @@ class HybridParallelLossyCompressor(LossyCompressor):
         )
         means_non_anchor_packed = self._pack_non_anchor(means_non_anchor)
         scales_non_anchor_packed = self._pack_non_anchor(scales_non_anchor)
-        indexes_non_anchor = self.gaussian_conditional.build_indexes(
-            scales_non_anchor_packed
-        )
+        indexes_non_anchor = self._build_indexes(scales_non_anchor_packed)
         non_anchor_indexes = torch.split(indexes_non_anchor, batch, dim=0)
         non_anchor_means = torch.split(means_non_anchor_packed, batch, dim=0)
         non_anchor_strings = [group[1] for group in tail_strings]
@@ -787,6 +914,8 @@ class HNet(nn.Sequential):
         base_channel: int,
         entropy_workers: int = 4,
         use_native_entropy: bool = True,
+        use_searchsorted_indexes: bool = False,
+        defer_native_encode: bool = False,
     ) -> None:
         super().__init__()
         self.net = HybridParallelLossyCompressor(
@@ -795,6 +924,8 @@ class HNet(nn.Sequential):
             base_channel,
             entropy_workers=entropy_workers,
             use_native_entropy=use_native_entropy,
+            use_searchsorted_indexes=use_searchsorted_indexes,
+            defer_native_encode=defer_native_encode,
         )
 
     def forward(self, x: Tensor):
